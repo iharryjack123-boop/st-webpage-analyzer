@@ -171,15 +171,14 @@ const api=async(fn,body)=>{let code=sessionStorage.getItem('ac')||'';
 const parse=t=>{t=String(t);const a=t.indexOf('{'),b=t.lastIndexOf('}');if(a<0||b<a)throw new Error('The AI returned no JSON.');return JSON.parse(t.slice(a,b+1))};
 const ask=async p=>{let e;for(let i=0;i<2;i++){try{const id=crypto.randomUUID();await api('analyze-background',{id,prompt:p});const t0=Date.now();
  while(Date.now()-t0<420000){await new Promise(r=>setTimeout(r,2500));const s=await api('analyze-status',{id});if(s.status==='done')return parse(s.text);if(s.status==='error')throw new Error(s.error)}
- throw new Error('The AI took too long.')}catch(x){e=x;if(/access code|not set|No free models/i.test(x.message))break}}throw e};
+ throw new Error('The AI took too long.')}catch(x){e=x;if(/access code|not set|No free models|No AI key/i.test(x.message))break}}throw e};
 function prompts(L,url,type,k){
  const facts={url,type,keywords:k,title:L.F.title,metaDescription:L.F.metaDescription,h1:L.F.h1,schemaTypes:L.F.schemaTypes,words:L.F.words,weakChecks:L.C.filter(c=>c.s!=='pass').map(c=>c.cat+': '+c.label)};
- const base=`Audit this ${type} as a senior SEO, GEO (generative engine optimization), AEO and conversion specialist. Be specific to the page content, never generic, and optimize for the target keywords. Automated facts: ${JSON.stringify(facts)}\nPAGE TEXT (truncated):\n"""${L.F.sample}"""\n`;
+ const base=`Audit this ${type} as a senior SEO, GEO (generative engine optimization), AEO and conversion specialist. Be specific to the page content, never generic, and optimize for the target keywords. Automated facts: ${JSON.stringify(facts)}\nPAGE TEXT (truncated):\n"""${L.F.sample.slice(0,6500)}"""\n`;
  return [
- base+`Return ONLY this JSON: {"summary":"3-4 sentence verdict","scores":{"content_quality":0,"geo":0,"llm_readiness":0,"trust":0,"aeo":0,"seo":0},"strengths":["3-5 short items"]}. Scores are integers 0-100.`,
- base+`Return ONLY this JSON: {"gaps":[{"area":"Quality|GEO|LLM|Trust|AEO|Schema|SEO","priority":"high|medium|low","issue":"one sentence","fix":"concrete step, max 35 words, with example wording"}]}. Give exactly 8 gaps, high priority first.`,
- base+`Return ONLY this JSON: {"aeo_questions":[{"q":"question users or AI assistants would ask","answer":"40-60 word answer based on the page, or what the page should say"}],"schema_jsonld":{"@context":"https://schema.org"}}. Give 5-6 questions. schema_jsonld must be one complete JSON-LD object (use @graph for several types) for this page, using only facts on the page and "[ADD]" for unknown values.`,
- base+`Return ONLY this JSON: {"rewrites":{"title":"under 60 characters, main keyword first","meta_description":"140-160 characters with a call to action","h1":"","intro":"2-3 sentence answer-first opening paragraph"}}`];
+ base+`Return ONLY this JSON: {"summary":"3-4 sentence verdict","scores":{"content_quality":0,"geo":0,"llm_readiness":0,"trust":0,"aeo":0,"seo":0},"strengths":["3-5 short items"],"rewrites":{"title":"under 60 characters, main keyword first","meta_description":"140-160 characters with a call to action","h1":"","intro":"2-3 sentence answer-first opening paragraph"}}. Scores are integers 0-100.`,
+ base+`Return ONLY this JSON: {"gaps":[{"area":"Quality|GEO|LLM|Trust|AEO|Schema|SEO","priority":"high|medium|low","issue":"one sentence","fix":"concrete step, max 35 words, with example wording"}],"aeo_questions":[{"q":"question users or AI assistants would ask","answer":"40-60 word answer based on the page, or what the page should say"}],"schema_jsonld":{"@context":"https://schema.org"}}. Give exactly 8 gaps (high priority first) and 5 questions. schema_jsonld must be one complete JSON-LD object (use @graph for several types) for this page, using only facts on the page and "[ADD]" for unknown values.`
+];
 }
 async function run(src,url,site){
  const type=$('#type').value,k=KW(),L=local(src,url,type,k,site);
