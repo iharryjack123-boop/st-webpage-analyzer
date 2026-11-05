@@ -1,31 +1,53 @@
 import { getStore } from '@netlify/blobs';
-// Automatically finds currently FREE text models on OpenRouter (pricing = 0) and tries them in order.
-// Paid models are never used: every candidate must be listed with zero prompt and completion price.
-const PREF = [/llama-3\.3-70b/, /gpt-oss/, /deepseek/, /qwen/, /gemma-3/, /mistral/, /llama/, /glm/, /nemotron/];
-let cache = { t: 0, list: [] };
+
+// Tries free AI providers in order: Groq, Gemini (free keys), then OpenRouter free models.
+// Providers without a key are skipped. OpenRouter models are used only if listed at price 0.
+const PREF = [/llama-3\.3-70b/, /gpt-oss-120b/, /gpt-oss/, /llama-4/, /deepseek/, /qwen/, /kimi/, /gemma/, /mistral/, /llama/, /glm/, /nemotron/];
+const TRUSTED = /^(meta-llama|deepseek|qwen|google|mistralai|openai|nvidia|z-ai|moonshotai|nousresearch|microsoft)\//;
+const BAD = /r1|thinking|reason|vision|\bvl\b|coder|guard|embed|whisper|tts|orpheus|safeguard/i;
 const dead = new Map();
 const zero = v => v === undefined || v === null || Number(v) === 0;
 const isFree = m => m.pricing && m.pricing.prompt !== undefined && m.pricing.completion !== undefined &&
   Number(m.pricing.prompt) === 0 && Number(m.pricing.completion) === 0 && zero(m.pricing.request) && zero(m.pricing.image);
 
-async function freeModels(base, key) {
-  if (Date.now() - cache.t < 600000 && cache.list.length) return cache.list;
+async function list(base, key) {
   const r = await fetch(base + '/models', { headers: { authorization: 'Bearer ' + key }, signal: AbortSignal.timeout(8000) });
-  const j = await r.json();
-  const list = (j.data || [])
-    .filter(m => isFree(m) && /text/.test((m.architecture?.output_modalities || ['text']).join()) &&
-      /text/.test((m.architecture?.input_modalities || ['text']).join()) && (m.context_length || 0) >= 8000)
-    .map(m => {
-      let s = (m.context_length || 0) / 1e5;
-      const i = PREF.findIndex(p => p.test(m.id));
-      s += i < 0 ? 0 : (PREF.length - i) * 2;
-      if (/r1|thinking|reason|\bvl\b|vision|coder|guard|embed/i.test(m.id)) s -= 6;
-      if (/-(1|2|3|4)b\b/i.test(m.id)) s -= 5;
-      return { id: m.id, s };
-    })
-    .sort((a, b) => b.s - a.s).map(x => x.id);
-  cache = { t: Date.now(), list };
-  return list;
+  return (await r.json()).data || [];
+}
+const score = (id, ctx = 0) => {
+  const i = PREF.findIndex(p => p.test(id));
+  let s = (i < 0 ? 0 : (PREF.length - i) * 2) + Math.min(ctx, 128000) / 128000;
+  if (BAD.test(id)) s -= 8;
+  if (/-(1|2|3|4|7|8)b\b/i.test(id)) s -= 3;
+  return s;
+};
+const freeIds = data => data
+  .filter(m => isFree(m) && /text/.test((m.architecture?.output_modalities || ['text']).join()) &&
+    /text/.test((m.architecture?.input_modalities || ['text']).join()) && (m.context_length || 0) >= 8000 && TRUSTED.test(m.id))
+  .map(m => ({ id: m.id, s: score(m.id, m.context_length) })).sort((a, b) => b.s - a.s).map(x => x.id);
+
+function buildProviders() {
+  const E = process.env, P = [];
+  if (E.GROQ_API_KEY) {
+    const base = 'https://api.groq.com/openai/v1';
+    P.push({ name: 'Groq', base, key: E.GROQ_API_KEY, json: true, models: async () =>
+      (await list(base, E.GROQ_API_KEY)).map(m => m.id).filter(id => !BAD.test(id)).sort((a, b) => score(b) - score(a)).slice(0, 3) });
+  }
+  if (E.GEMINI_API_KEY) {
+    P.push({ name: 'Gemini', base: 'https://generativelanguage.googleapis.com/v1beta/openai', key: E.GEMINI_API_KEY, json: true,
+      models: async () => ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash'] });
+  }
+  const ork = E.AI_API_KEY || E.OPENROUTER_API_KEY;
+  const base = (E.AI_BASE_URL || 'https://openrouter.ai/api/v1').replace(/\/$/, '');
+  const pinned = (E.AI_MODEL || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (ork) {
+    if (base.includes('openrouter.ai')) P.push({ name: 'OpenRouter', base, key: ork, json: false, models: async () => {
+      const free = freeIds(await list(base, ork));
+      return [...pinned.filter(p => free.includes(p)), ...free.filter(m => !pinned.includes(m))].slice(0, 4);
+    } });
+    else P.push({ name: 'Custom', base, key: ork, json: false, models: async () => pinned });
+  }
+  return P;
 }
 
 // Pulls one JSON object out of a model reply and repairs the usual small mistakes.
@@ -37,40 +59,38 @@ function clean(t) {
   try { return JSON.parse(t); } catch { return null; }
 }
 
-async function callAI(prompt) {
-  const key = process.env.AI_API_KEY;
-  if (!key) throw new Error('AI_API_KEY is not set in Netlify environment variables.');
-  const base = (process.env.AI_BASE_URL || 'https://openrouter.ai/api/v1').replace(/\/$/, '');
-  const pinned = (process.env.AI_MODEL || '').split(',').map(s => s.trim()).filter(Boolean);
-  let last = '', models;
-  if (base.includes('openrouter.ai')) {
-    try {
-      const free = await freeModels(base, key);
-      models = [...pinned.filter(p => free.includes(p)), ...free.filter(m => !pinned.includes(m))];
-    } catch (e) { last = 'Could not list free models: ' + e.message; models = []; }
-  } else models = pinned;
-  const alive = models.filter(m => !(dead.get(m) > Date.now()));
-  const tryList = (alive.length ? alive : models).slice(0, 5);
-  if (!tryList.length) throw new Error('No free models available right now. ' + last);
-  for (const model of tryList) {
-    try {
-      const r = await fetch(base + '/chat/completions', {
-        method: 'POST',
-        signal: AbortSignal.timeout(70000),
-        headers: { 'content-type': 'application/json', authorization: 'Bearer ' + key, 'x-title': 'Page Analyzer' },
-        body: JSON.stringify({ model, temperature: 0.2, max_tokens: 2000, messages: [
-          { role: 'system', content: 'You are a precise SEO auditor. Reply with one valid JSON object only. No markdown, no commentary. Never put double quotes inside string values; use single quotes instead.' },
-          { role: 'user', content: String(prompt).slice(0, 24000) }] })
-      });
-      const j = await r.json();
-      const t = j.choices?.[0]?.message?.content;
-      const o = r.ok && t ? clean(t) : null;
-      if (o) return { text: JSON.stringify(o), model };
-      last = model + ': ' + (j.error?.message || (t ? 'invalid JSON in reply' : 'empty reply'));
-      dead.set(model, Date.now() + 300000);
-    } catch (e) { last = model + ': ' + e.message; dead.set(model, Date.now() + 120000); }
+async function attempt(p, model, prompt) {
+  const body = { model, temperature: 0.2, max_tokens: 2200, messages: [
+    { role: 'system', content: 'You are a precise SEO auditor. Reply with one valid JSON object only. No markdown, no commentary. Never put double quotes inside string values; use single quotes instead.' },
+    { role: 'user', content: String(prompt).slice(0, 24000) }] };
+  if (p.json) body.response_format = { type: 'json_object' };
+  const r = await fetch(p.base + '/chat/completions', { method: 'POST', signal: AbortSignal.timeout(60000),
+    headers: { 'content-type': 'application/json', authorization: 'Bearer ' + p.key, 'x-title': 'Page Analyzer' }, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => ({}));
+  const t = j.choices?.[0]?.message?.content;
+  const o = r.ok && t ? clean(t) : null;
+  if (o) return o;
+  const raw = j.error?.metadata?.raw ? ': ' + String(j.error.metadata.raw).slice(0, 120) : '';
+  throw new Error((j.error?.message || (t ? 'invalid JSON in reply' : 'HTTP ' + r.status)) + raw);
+}
+
+async function callAI(prompt, retry = true) {
+  const P = buildProviders();
+  if (!P.length) throw new Error('No AI key set. Add GROQ_API_KEY (free at console.groq.com/keys) in Netlify environment variables.');
+  const errs = []; let tried = 0;
+  for (const p of P) {
+    let ms = [];
+    try { ms = await p.models(); } catch (e) { errs.push(p.name + ': could not list models (' + e.message + ')'); continue; }
+    for (const m of ms) {
+      const k = p.name + '/' + m;
+      if (dead.get(k) > Date.now()) continue;
+      tried++;
+      try { return { text: JSON.stringify(await attempt(p, m, prompt)), model: k }; }
+      catch (e) { errs.push(k + ': ' + e.message); dead.set(k, Date.now() + (/429|rate|quota|limit/i.test(e.message) ? 60000 : 300000)); }
+    }
   }
-  throw new Error('All free models failed or are busy. Last error: ' + last);
+  if (!tried && retry) { dead.clear(); return callAI(prompt, false); }
+  throw new Error('All AI providers failed. ' + errs.slice(-3).join(' | '));
 }
 
 // Background function: runs up to 15 minutes, result is saved for analyze-status to return.
@@ -82,8 +102,7 @@ export default async (req) => {
     id = b.id;
     const code = process.env.ACCESS_CODE;
     if (code && req.headers.get('x-access-code') !== code) { await store.setJSON(id, { status: 'error', error: 'Access code required. Reload the page and enter it.' }); return; }
-    const out = await callAI(b.prompt);
-    await store.setJSON(id, { status: 'done', ...out });
+    await store.setJSON(id, { status: 'done', ...(await callAI(b.prompt)) });
   } catch (e) {
     if (id) await store.setJSON(id, { status: 'error', error: e.message });
   }
