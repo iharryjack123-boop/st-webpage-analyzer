@@ -28,6 +28,15 @@ async function freeModels(base, key) {
   return list;
 }
 
+// Pulls one JSON object out of a model reply and repairs the usual small mistakes.
+function clean(t) {
+  t = String(t || '');
+  const a = t.indexOf('{'), b = t.lastIndexOf('}');
+  if (a < 0 || b < a) return null;
+  t = t.slice(a, b + 1).replace(/[\u0000-\u001f]/g, ' ').replace(/,\s*([}\]])/g, '$1');
+  try { return JSON.parse(t); } catch { return null; }
+}
+
 async function callAI(prompt) {
   const key = process.env.AI_API_KEY;
   if (!key) throw new Error('AI_API_KEY is not set in Netlify environment variables.');
@@ -49,14 +58,15 @@ async function callAI(prompt) {
         method: 'POST',
         signal: AbortSignal.timeout(70000),
         headers: { 'content-type': 'application/json', authorization: 'Bearer ' + key, 'x-title': 'Page Analyzer' },
-        body: JSON.stringify({ model, temperature: 0.3, max_tokens: 2000, messages: [
-          { role: 'system', content: 'You are a precise SEO auditor. Reply with one valid JSON object only. No markdown, no commentary.' },
+        body: JSON.stringify({ model, temperature: 0.2, max_tokens: 2000, messages: [
+          { role: 'system', content: 'You are a precise SEO auditor. Reply with one valid JSON object only. No markdown, no commentary. Never put double quotes inside string values; use single quotes instead.' },
           { role: 'user', content: String(prompt).slice(0, 24000) }] })
       });
       const j = await r.json();
       const t = j.choices?.[0]?.message?.content;
-      if (r.ok && t && t.includes('{')) return { text: t, model };
-      last = model + ': ' + (j.error?.message || (t ? 'no JSON in reply' : 'empty reply'));
+      const o = r.ok && t ? clean(t) : null;
+      if (o) return { text: JSON.stringify(o), model };
+      last = model + ': ' + (j.error?.message || (t ? 'invalid JSON in reply' : 'empty reply'));
       dead.set(model, Date.now() + 300000);
     } catch (e) { last = model + ': ' + e.message; dead.set(model, Date.now() + 120000); }
   }
