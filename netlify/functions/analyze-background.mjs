@@ -1,6 +1,6 @@
 import { getStore } from '@netlify/blobs';
 
-// Tries free AI providers in order: Groq, Gemini (free keys), then OpenRouter free models.
+// Tries free AI providers in order: Groq, Cerebras, Gemini, Mistral, Cloudflare, SambaNova, NVIDIA (free keys), then OpenRouter free models.
 // Providers without a key are skipped. OpenRouter models are used only if listed at price 0.
 const PREF = [/llama-3\.3-70b/, /gpt-oss-120b/, /gpt-oss/, /llama-4/, /deepseek/, /qwen/, /kimi/, /gemma/, /mistral/, /llama/, /glm/, /nemotron/];
 const TRUSTED = /^(meta-llama|deepseek|qwen|google|mistralai|openai|nvidia|z-ai|moonshotai|nousresearch|microsoft)\//;
@@ -33,9 +33,31 @@ function buildProviders() {
     P.push({ name: 'Groq', base, key: E.GROQ_API_KEY, json: true, models: async () =>
       (await list(base, E.GROQ_API_KEY)).map(m => m.id).filter(id => !BAD.test(id)).sort((a, b) => score(b) - score(a)).slice(0, 3) });
   }
+  if (E.CEREBRAS_API_KEY) {
+    const base = 'https://api.cerebras.ai/v1';
+    P.push({ name: 'Cerebras', base, key: E.CEREBRAS_API_KEY, json: true, models: async () =>
+      (await list(base, E.CEREBRAS_API_KEY)).map(m => m.id).filter(id => !BAD.test(id)).sort((a, b) => score(b) - score(a)).slice(0, 3) });
+  }
   if (E.GEMINI_API_KEY) {
     P.push({ name: 'Gemini', base: 'https://generativelanguage.googleapis.com/v1beta/openai', key: E.GEMINI_API_KEY, json: true,
       models: async () => ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash'] });
+  }
+  if (E.MISTRAL_API_KEY) {
+    P.push({ name: 'Mistral', base: 'https://api.mistral.ai/v1', key: E.MISTRAL_API_KEY, json: true,
+      models: async () => ['mistral-small-latest', 'open-mistral-nemo'] });
+  }
+  if (E.CLOUDFLARE_API_TOKEN && E.CLOUDFLARE_ACCOUNT_ID) {
+    P.push({ name: 'Cloudflare', base: 'https://api.cloudflare.com/client/v4/accounts/' + E.CLOUDFLARE_ACCOUNT_ID + '/ai/v1', key: E.CLOUDFLARE_API_TOKEN, json: false,
+      models: async () => ['@cf/meta/llama-3.3-70b-instruct-fp8-fast', '@cf/openai/gpt-oss-120b', '@cf/meta/llama-3.1-8b-instruct'] });
+  }
+  if (E.SAMBANOVA_API_KEY) {
+    const base = 'https://api.sambanova.ai/v1';
+    P.push({ name: 'SambaNova', base, key: E.SAMBANOVA_API_KEY, json: false, models: async () =>
+      (await list(base, E.SAMBANOVA_API_KEY)).map(m => m.id).filter(id => /llama|gpt-oss|deepseek|qwen/i.test(id) && !BAD.test(id)).sort((a, b) => score(b) - score(a)).slice(0, 3) });
+  }
+  if (E.NVIDIA_API_KEY) {
+    P.push({ name: 'NVIDIA', base: 'https://integrate.api.nvidia.com/v1', key: E.NVIDIA_API_KEY, json: false,
+      models: async () => ['meta/llama-3.3-70b-instruct', 'meta/llama-3.1-70b-instruct', 'mistralai/mistral-small-3.1-24b-instruct-2503'] });
   }
   const ork = E.AI_API_KEY || E.OPENROUTER_API_KEY;
   const base = (E.AI_BASE_URL || 'https://openrouter.ai/api/v1').replace(/\/$/, '');
@@ -43,7 +65,7 @@ function buildProviders() {
   if (ork) {
     if (base.includes('openrouter.ai')) P.push({ name: 'OpenRouter', base, key: ork, json: false, models: async () => {
       const free = freeIds(await list(base, ork));
-      return [...pinned.filter(p => free.includes(p)), ...free.filter(m => !pinned.includes(m))].slice(0, 4);
+      return [...pinned.filter(p => free.includes(p)), ...free.filter(m => !pinned.includes(m))].slice(0, 2);
     } });
     else P.push({ name: 'Custom', base, key: ork, json: false, models: async () => pinned });
   }
@@ -64,6 +86,7 @@ async function attempt(p, model, prompt) {
     { role: 'system', content: 'You are a precise SEO auditor. Reply with one valid JSON object only. No markdown, no commentary. Never put double quotes inside string values; use single quotes instead.' },
     { role: 'user', content: String(prompt).slice(0, 24000) }] };
   if (p.json) body.response_format = { type: 'json_object' };
+  if (p.name === 'Gemini' && /2\.5/.test(model)) body.reasoning_effort = 'none';
   const r = await fetch(p.base + '/chat/completions', { method: 'POST', signal: AbortSignal.timeout(60000),
     headers: { 'content-type': 'application/json', authorization: 'Bearer ' + p.key, 'x-title': 'Page Analyzer' }, body: JSON.stringify(body) });
   const j = await r.json().catch(() => ({}));
@@ -90,7 +113,7 @@ async function callAI(prompt, retry = true) {
     }
   }
   if (!tried && retry) { dead.clear(); return callAI(prompt, false); }
-  throw new Error('All AI providers failed. ' + errs.slice(-3).join(' | '));
+  throw new Error('Keys found for: ' + P.map(p => p.name).join(', ') + '. All failed. ' + errs.map(e => e.slice(0, 170)).join(' | '));
 }
 
 // Background function: runs up to 15 minutes, result is saved for analyze-status to return.
